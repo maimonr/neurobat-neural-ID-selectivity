@@ -8,7 +8,11 @@ all_cells = unique(bat_id_pred_all(:,varIdx), 'rows');
 [sigIdx,callSigIdx] = deal(false(1,size(bat_id_pred_all,1)));
 for k = 1:size(all_cells,1)
     idx = find(ismember(bat_id_pred_all(:,varIdx),all_cells(k,:)));
-    p = 1 - cellfun(@(acc,bootAcc) sum(acc > bootAcc)/length(bootAcc),num2cell(bat_id_pred_all.acc(idx)),bat_id_pred_all.bootAcc(idx,:));
+    if iscell(bat_id_pred_all.bootAcc)
+        p = 1 - cellfun(@(acc,bootAcc) sum(acc > bootAcc)/length(bootAcc),num2cell(bat_id_pred_all.acc(idx)),bat_id_pred_all.bootAcc(idx,:));
+    else
+        p = 1 - cellfun(@(acc,bootAcc) sum(acc > bootAcc)/length(bootAcc),num2cell(bat_id_pred_all.acc(idx)),num2cell(bat_id_pred_all.bootAcc(idx,:),2));
+    end
     sigIdx(idx) = calculate_sig(p,alpha0,correctionType);
     
     if callAccFlag

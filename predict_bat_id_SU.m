@@ -2,13 +2,16 @@ function bat_id_pred = predict_bat_id_SU(vd,varargin)
 
 pnames = {'n_boot_rep','nCV','minCalls','cData','timeWin','winSize','predType',...
     'mdlType','select_cell_table','min_boot_thresh','exclude_by_bhv','callPred',...
-    'benchmark_exclusion','call_dist_map'};
+    'benchmark_exclusion','call_dist_map','call_dist_mode','call_dist_thresh',...
+    'selectBats'};
 dflts  = {1e3,5,15,[],[-1 1],0.25,'one_vs_all',...
     'glm_fit_log',[],0.9,[],false,...
-    false,[],[]};
+    false,[],'none',10,...
+    []};
 [n_boot_rep,nCV,minCalls,cData,timeWin,winSize,predType,...
     mdlType,select_cell_table,min_boot_thresh,exclude_by_bhv_type,callPred,...
-    benchmark_exclusion_flag,call_dist_map] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+    benchmark_exclusion_flag,call_dist_map,call_dist_mode,call_dist_thresh,...
+    selectBats] = internal.stats.parseArgs(pnames,dflts,varargin{:});
 
 [t,t_idx] = inRange(vd.time,timeWin);
 
@@ -17,18 +20,16 @@ sliding_win_idx = sliding_win_idx + vd.constantBW/vd.dT;
 
 nBat = length(vd.batNums);
 
-use_call_dist = ~isempty(call_dist_map);
-if use_call_dist
-    call_dist_thresh = 25;
-end
-
 varNames = {'acc','callAcc','bootAcc','bootCallAcc','targetBNum','batNum','cell_k','cellInfo'};
 nVar = length(varNames);
 switch predType
     case 'one_vs_all'
         all_target_bat_nums = [vd.call_bat_num{:}];
+        all_target_bat_nums = all_target_bat_nums(~cellfun(@isempty,all_target_bat_nums));
         n_target_bat = length(unique(all_target_bat_nums(~cellfun(@iscell,all_target_bat_nums)))) - 1;
     case 'self_vs_other'
+        n_target_bat = 1;
+    case 'selectBats'
         n_target_bat = 1;
 end
 maxRows = vd.nCells*n_target_bat;
@@ -46,24 +47,37 @@ for bat_k = 1:nBat
     nCell = length(cell_ks);
     k = 1;
     for cell_k = cell_ks
-        call_bat_nums = vd.call_bat_num{cell_k};
         switch predType
             case 'one_vs_all'
+                call_bat_nums = vd.call_bat_num{cell_k};
                 target_bat_nums = unique(cellflat(call_bat_nums));
                 target_bat_nums = setdiff(target_bat_nums,[self_bat_num,'unidentified']);
+                n_target_bats = length(target_bat_nums);
                 
             case 'self_vs_other'
                 target_bat_nums = self_bat_num;
+                n_target_bats = 1;
+                
+            case 'selectBats'
+                current_cell_table = table(self_bat_num,vd.cellInfo(cell_k),'VariableNames',{'batNum','cellInfo'});
+                current_cell_idx = ismember(selectBats(:,1:2),current_cell_table);
+                if ~any(current_cell_idx)
+                    continue
+                end
+                   
+                target_bat_nums = selectBats.target_bat_nums(current_cell_idx,:);
+                n_target_bats = 1;
         end
         
-        n_target_bats = length(target_bat_nums);
+        call_bat_nums = vd.call_bat_num{cell_k};
+        call_bat_nums(cellfun(@iscell,call_bat_nums)) = {'unidentified'};
         
         trialFR = vd.trialFR(cell_k);
         trialFR = trialFR(:,t_idx);
-        trial_fr_binned = nan(size(trialFR,1),size(sliding_win_idx,1));
+        trialPredictors = nan(size(trialFR,1),size(sliding_win_idx,1));
         for trial_k = 1:size(trialFR,1)
             trial_fr_tmp = trialFR(trial_k,:);
-            trial_fr_binned(trial_k,:) = mean(trial_fr_tmp(sliding_win_idx'));
+            trialPredictors(trial_k,:) = mean(trial_fr_tmp(sliding_win_idx'));
         end
         
         for target_bat_k = 1:n_target_bats
@@ -80,69 +94,79 @@ for bat_k = 1:nBat
                 end
             end
             
-            targetIdx = vd.usedCalls{cell_k} & strcmp(vd.call_bat_num{cell_k},target_bat_num);
+            targetIdx = vd.usedCalls{cell_k} & ismember(call_bat_nums,target_bat_num{1});
             
             switch predType
                 case 'one_vs_all'
-                    nontargetIdx = vd.usedCalls{cell_k} & ~strcmp(vd.call_bat_num{cell_k},target_bat_num) & ~strcmp(vd.call_bat_num{cell_k},self_bat_num);
+                    nontargetIdx = vd.usedCalls{cell_k} & ~strcmp(call_bat_nums,target_bat_num) & ~strcmp(vd.call_bat_num{cell_k},self_bat_num);
                 case 'self_vs_other'
-                    nontargetIdx = vd.usedCalls{cell_k} & ~strcmp(vd.call_bat_num{cell_k},target_bat_num);
+                    nontargetIdx = vd.usedCalls{cell_k} & ~strcmp(call_bat_nums,target_bat_num);
+                case 'selectBats'
+                    nontargetIdx = vd.usedCalls{cell_k} & ismember(call_bat_nums,target_bat_nums{2});
             end
             
-            if sum(targetIdx) > minCalls && sum(nontargetIdx) > minCalls
-                
-                if ~isempty(exclude_by_bhv_type)
-                    target_idx_orig = targetIdx;
-                    nontarget_idx_orig = nontargetIdx;
-                    [targetIdx,nontargetIdx] = exclude_by_bhv(vd,cData,cell_k,target_idx_orig,nontarget_idx_orig,exclude_by_bhv_type);
-                    if ~(sum(targetIdx) > minCalls && sum(nontargetIdx) > minCalls)
-                        continue
-                    end
-                end
-                
-                if ~isempty(call_dist_map)
+            if ~(sum(targetIdx) > minCalls && sum(nontargetIdx) > minCalls)
+                continue
+            end
+            
+            if ~isempty(exclude_by_bhv_type)
+                target_idx_orig = targetIdx;
+                nontarget_idx_orig = nontargetIdx;
+                [targetIdx,nontargetIdx] = exclude_by_bhv(vd,cData,cell_k,target_idx_orig,nontarget_idx_orig,exclude_by_bhv_type);
+            end
+            
+            switch call_dist_mode
+                case 'exclude_by_dist'
                     target_idx_orig = targetIdx;
                     nontarget_idx_orig = nontargetIdx;
                     [targetIdx,nontargetIdx] = exclude_by_dist(vd,cell_k,target_idx_orig,nontarget_idx_orig,call_dist_map,call_dist_thresh);
-                    if ~(sum(targetIdx) > minCalls && sum(nontargetIdx) > minCalls)
-                        continue
-                    end
-                end
-                
-                X = [trial_fr_binned(targetIdx,:); trial_fr_binned(nontargetIdx,:)];
-                Y = [zeros(sum(targetIdx),1); ones(sum(nontargetIdx),1)];
-                
-                if callPred
-                    [callX, callY] = init_call_pred(vd,cData,cell_k,timeWin);
-                else
-                    [callX,callY] = deal([]);
-                end
-                
-                cvAcc = get_cv_id_acc(X,Y,nCV,'mdlType',mdlType);
-                bat_id_pred_mat{row_k,1} = mean(cvAcc);
-                
-                if benchmark_exclusion_flag
-                    bootAcc = get_benchmark_acc(trial_fr_binned,n_boot_rep,nCV,mdlType,target_idx_orig,nontarget_idx_orig,targetIdx,nontargetIdx);
-                    bootCallAcc = [];
-                else
-                    [bootAcc,bootCallAcc] = get_boot_acc(X,Y,bat_id_pred_mat{row_k,1},n_boot_rep,nCV,mdlType,callPred,min_boot_thresh);
-                end
-                
-                if callPred
-                    cvCallAcc = get_cv_id_acc(callX,callY,nCV,'mdlType',mdlType);
-                    bat_id_pred_mat{row_k,2} = mean(cvCallAcc);
-                end
-                
-                bat_id_pred_mat{row_k,3} = bootAcc;
-                bat_id_pred_mat{row_k,4} = bootCallAcc;
-                
-                bat_id_pred_mat{row_k,5} = target_bat_num{1};
-                bat_id_pred_mat{row_k,6} = self_bat_num{1};
-                bat_id_pred_mat{row_k,7} = cell_k;
-                bat_id_pred_mat{row_k,8} = vd.cellInfo{cell_k};
-                row_k = row_k + 1;
+                case 'use_dist_pred'
+                    callDist = get_call_dist(vd,cell_k,call_dist_map);
+                    
+                    used_call_dist_idx = ~isnan(callDist);
+                    targetIdx = targetIdx & used_call_dist_idx;
+                    nontargetIdx = nontargetIdx & used_call_dist_idx;
+                    trialPredictors = [trialPredictors callDist'];
             end
+            
+            if ~(sum(targetIdx) > minCalls && sum(nontargetIdx) > minCalls)
+                continue
+            end
+            
+            X = [trialPredictors(targetIdx,:); trialPredictors(nontargetIdx,:)];
+            Y = [zeros(sum(targetIdx),1); ones(sum(nontargetIdx),1)];
+            
+            if callPred
+                [callX, callY] = init_call_pred(vd,cData,cell_k,timeWin);
+            else
+                [callX,callY] = deal([]);
+            end
+            
+            cvAcc = get_cv_id_acc(X,Y,nCV,'mdlType',mdlType);
+            bat_id_pred_mat{row_k,1} = mean(cvAcc);
+            
+            if benchmark_exclusion_flag
+                bootAcc = get_benchmark_acc(trialPredictors,n_boot_rep,nCV,mdlType,target_idx_orig,nontarget_idx_orig,targetIdx,nontargetIdx);
+                bootCallAcc = [];
+            else
+                [bootAcc,bootCallAcc] = get_boot_acc(X,Y,bat_id_pred_mat{row_k,1},n_boot_rep,nCV,mdlType,callPred,min_boot_thresh);
+            end
+            
+            if callPred
+                cvCallAcc = get_cv_id_acc(callX,callY,nCV,'mdlType',mdlType);
+                bat_id_pred_mat{row_k,2} = mean(cvCallAcc);
+            end
+            
+            bat_id_pred_mat{row_k,3} = bootAcc;
+            bat_id_pred_mat{row_k,4} = bootCallAcc;
+            
+            bat_id_pred_mat{row_k,5} = target_bat_num{1};
+            bat_id_pred_mat{row_k,6} = self_bat_num{1};
+            bat_id_pred_mat{row_k,7} = cell_k;
+            bat_id_pred_mat{row_k,8} = vd.cellInfo{cell_k};
+            row_k = row_k + 1;
         end
+        
         progress = round(10*(k/nCell))*10;
         if mod(progress,10) < mod(lastProgress,10)
             fprintf('%d %% of cells from bat %d / %d\n',progress,bat_k,nBat)
@@ -157,7 +181,7 @@ end
 
 bat_id_pred_mat = bat_id_pred_mat(1:row_k-1,:);
 bat_id_pred = cell2table(bat_id_pred_mat,'VariableNames',varNames);
-
+close(f)
 end
 
 function [targetIdx,nontargetIdx] = exclude_by_bhv(vd,cData,cell_k,targetIdx,nontargetIdx,exclude_by_bhv_type)
@@ -207,23 +231,30 @@ end
 
 function [targetIdx,nontargetIdx] = exclude_by_dist(vd,cell_k,targetIdx,nontargetIdx,call_dist_map,call_dist_thresh)
 
+callDist = get_call_dist(vd,cell_k,call_dist_map);
+
+call_dist_idx = sign(call_dist_thresh)*callDist < call_dist_thresh;
+
+targetIdx = targetIdx & call_dist_idx;
+nontargetIdx = nontargetIdx & call_dist_idx;
+end
+
+function callDist = get_call_dist(vd,cell_k,call_dist_map)
 callIDs = vd.callNum{cell_k};
 calling_bat_nums = vd.call_bat_num{cell_k};
 self_bat_num = vd.batNum(cell_k);
-call_dist_idx = false(1,length(callIDs));
+callDist = nan(1,length(callIDs));
 call_k = 1;
 for callID = callIDs
     if isKey(call_dist_map,callID) && ~iscell(calling_bat_nums{call_k})
         bat_pair_str = strjoin(sort([calling_bat_nums(call_k),self_bat_num]),'-');
         current_call_dist = call_dist_map(callID);
         if isKey(current_call_dist,bat_pair_str)
-            call_dist_idx(call_k) = current_call_dist(bat_pair_str) < call_dist_thresh;
+            callDist(call_k) = current_call_dist(bat_pair_str);
         end
     end
     call_k = call_k + 1;
 end
-targetIdx = targetIdx & call_dist_idx;
-nontargetIdx = nontargetIdx & call_dist_idx;
 end
 
 function [callX, callY] = init_call_pred(vd,cData,cell_k,timeWin)
