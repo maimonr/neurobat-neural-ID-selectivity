@@ -1,4 +1,6 @@
-function [acc,IDacc] = get_pos_data_decoding_acc(posData,cData,bat_id_pred,pos_data_type)
+function [acc,accPerm,IDacc] = get_pos_data_decoding_acc(posData,cData,bat_id_pred,pos_data_type)
+
+minCalls = 10;
 
 switch pos_data_type
     case 'dist'
@@ -23,9 +25,11 @@ call_exp_dates = cellfun(@(cNum) cData('callID',cNum).expDay,callNums);
 exclDate = datetime(2020,8,3);
 sigIdx = calculate_sig_id(bat_id_pred,6:8,'correctionType','BH');
 expDates = cellfun(@(s) datetime(s(1:8),'InputFormat','yyyyMMdd'),bat_id_pred.cellInfo);
-used_date_idx = expDates > datetime(2020,7,28) & expDates ~= exclDate;
+used_date_idx = expDates >= datetime(2020,7,28) & expDates ~= exclDate;
 sigIdx = sigIdx & used_date_idx';
 acc = nan(1,sum(sigIdx));
+nPerm = 1e3;
+accPerm = nan(nPerm,sum(sigIdx));
 k = 1;
 for cell_k = find(sigIdx)
     expDate = expDates(cell_k);
@@ -48,11 +52,23 @@ for cell_k = find(sigIdx)
     end
     Y = strcmp(call_bat_nums(dateIdx),target_bat_num)';
     nanIdx = ~any(isnan(d),2);
-    if sum(nanIdx) < 20
+    
+    d = d(nanIdx,:);
+    Y = Y(nanIdx);
+    
+    if sum(Y) < minCalls || sum(~Y) < minCalls
         continue
     end
-    mdl_log = fitclinear(d(nanIdx,:),Y(nanIdx),'Learner','logistic','Prior','uniform','KFold',5);
+    
+    mdl_log = fitclinear(d,Y,'Learner','logistic','Prior','uniform','KFold',5);
     acc(k) = 1 - kfoldLoss(mdl_log);
+    
+    for perm_k = 1:nPerm
+        permIdx = randperm(length(Y));
+        mdlPerm = fitclinear(d,Y(permIdx),'Learner','logistic','Prior','uniform');
+        accPerm(perm_k,k) = 1 - loss(mdlPerm,d,Y);
+    end
+    
     k = k + 1;
 end
 
